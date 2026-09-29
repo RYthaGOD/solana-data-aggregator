@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import datetime
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from metrics.defi import Defi, DefiMetricType
+from metrics.lending import Lending, LendingMetricType
 from metrics.overview import Overview, OverviewMetricType
 from metrics.stablecoin import Stablecoin, StablecoinMetricType
 from providers.base import BaseProvider
@@ -105,6 +106,31 @@ class Blockworks(BaseProvider):
             "date_field": "dt",
             "value_field": "revenue",
         },
+        # Charts 7653 and 7655 return the same daily lending table (Kamino + Jupiter Lend)
+        "lending_total_deposits": {
+            "chart_id": 7653,
+            "date_field": "dt",
+            "value_field": "total_deposit",
+        },
+        "lending_total_borrowed": {
+            "chart_id": 7655,
+            "date_field": "dt",
+            "value_field": "total_borrow",
+        },
+        "lending_utilization_rate": {
+            "chart_id": 7653,
+            "date_field": "dt",
+            "value_field": "total_dep_utilization",
+            # Blockworks reports a 0-1 ratio; stored as a 0-100 percentage
+            "value_scale": 100,
+        },
+        "lending_protocol_count": {
+            "chart_id": 7653,
+            "date_field": "dt",
+            # One protocol_deposit_<protocol> column per protocol; "_other" is a catch-all bucket
+            "count_positive_prefix": "protocol_deposit_",
+            "count_exclude_fields": ["protocol_deposit_other"],
+        },
     }
 
     BASE_URL = "https://api.blockworks.com/v1"
@@ -119,6 +145,7 @@ class Blockworks(BaseProvider):
             api_key=resolved_api_key,
         )
         self._session = requests.Session()
+        self._chart_cache: Dict[Tuple[int, str], List[Dict[str, Any]]] = {}
 
     # -- private helpers ----------------------------------------------------
 
@@ -167,6 +194,26 @@ class Blockworks(BaseProvider):
         date_field: str = "dt",
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
+        """Return the chart's rows within the date range.
+
+        Every page is fetched regardless of the range, so the full chart is
+        cached on the instance and metrics sharing a chart (e.g. lending
+        deposits and utilization on 7653) reuse one set of calls.
+        """
+        cache_key = (chart_id, date_field)
+        if cache_key not in self._chart_cache:
+            self._chart_cache[cache_key] = self._fetch_all_chart_rows(
+                chart_id, date_field=date_field, limit=limit
+            )
+        return [
+            row
+            for row in self._chart_cache[cache_key]
+            if start_date <= self._row_date(row, date_field) <= end_date
+        ]
+
+    def _fetch_all_chart_rows(
+        self, chart_id: int, *, date_field: str, limit: int
+    ) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         page = 1
         while True:
@@ -182,9 +229,7 @@ class Blockworks(BaseProvider):
             page_data = body.get("data", [])
             if not page_data:
                 break
-            for row in page_data:
-                if start_date <= self._row_date(row, date_field) <= end_date:
-                    rows.append(row)
+            rows.extend(page_data)
             total = body.get("total", 0)
             if len(page_data) < limit or (total and page * limit >= total):
                 break
@@ -241,17 +286,25 @@ class Blockworks(BaseProvider):
             value = self._extract_value(row, config)
             if value is None:
                 continue
-            result.append({"date": row_date, "value": float(value)})
+            result.append({"date": row_date, "value": float(value) * config.get("value_scale", 1)})
         return result
 
     def _extract_value(self, row: Dict[str, Any], config: Dict[str, Any]) -> Any:
+        prefix = config.get("count_positive_prefix")
+        if prefix is not None:
+            excluded = set(config.get("count_exclude_fields", []))
+            return sum(
+                1
+                for field, value in row.items()
+                if field.startswith(prefix) and field not in excluded and (value or 0) > 0
+            )
         return row.get(config["value_field"])
 
     # -- BaseProvider interface ---------------------------------------------
 
     def get_metric(
         self, metric: str, date: str, chain: str
-    ) -> Stablecoin | Overview | Defi | None:
+    ) -> Stablecoin | Overview | Defi | Lending | None:
         """Fetch one metric value and return it as a typed metric model."""
         rows = self.fetch_rows(metric, date, date)
         if not rows:
@@ -284,6 +337,19 @@ class Blockworks(BaseProvider):
         if metric in defi_metric_map:
             return Defi.from_metric_type(
                 metric_type=defi_metric_map[metric],
+                date=parsed_date,
+                value=value,
+            )
+
+        lending_metric_map = {
+            "lending_total_deposits": LendingMetricType.TOTAL_DEPOSITS,
+            "lending_total_borrowed": LendingMetricType.TOTAL_BORROWED,
+            "lending_utilization_rate": LendingMetricType.UTILIZATION_RATE,
+            "lending_protocol_count": LendingMetricType.PROTOCOL_COUNT,
+        }
+        if metric in lending_metric_map:
+            return Lending.from_metric_type(
+                metric_type=lending_metric_map[metric],
                 date=parsed_date,
                 value=value,
             )
