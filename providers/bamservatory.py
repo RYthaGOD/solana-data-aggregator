@@ -6,6 +6,8 @@ import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from metrics.network import Network, NetworkMetricType
 from providers.base import BaseProvider
@@ -24,6 +26,9 @@ class Bamservatory(BaseProvider):
 
     One request covers any date range. History begins 2026-06-20, and the day
     in progress is never published, so dates outside that span return no rows.
+
+    The session retries idempotent GETs with capped exponential backoff + jitter
+    on 408/429/5xx, since the endpoint is a static file behind a CDN.
 
     No API key required.
     """
@@ -56,6 +61,16 @@ class Bamservatory(BaseProvider):
             api_key="",
         )
         self._session = requests.Session()
+        retry = Retry(
+            total=3,
+            backoff_factor=0.5,
+            backoff_jitter=0.5,
+            status_forcelist=(408, 429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+            respect_retry_after_header=True,
+            raise_on_status=False,
+        )
+        self._session.mount("https://", HTTPAdapter(max_retries=retry))
 
     # -- private helpers ----------------------------------------------------
 
@@ -87,7 +102,12 @@ class Bamservatory(BaseProvider):
         for row in daily:
             day = row.get("date") if isinstance(row, dict) else None
             value = row.get(field) if isinstance(row, dict) else None
-            if not isinstance(day, str) or not isinstance(value, (int, float)):
+            if (
+                not isinstance(day, str)
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0 <= value <= 100
+            ):
                 raise ValueError(f"Malformed BAMservatory daily row: {row!r}")
             if start_date <= day <= end_date:
                 rows.append({"date": day, "value": float(value)})

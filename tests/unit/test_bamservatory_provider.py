@@ -114,10 +114,20 @@ def test_missing_daily_series_raises() -> None:
             provider.fetch_rows("network_bam_stake_share", "2026-10-01", "2026-10-01")
 
 
-def test_malformed_row_raises() -> None:
+@pytest.mark.parametrize("value", [None, "35.1", True, -0.5, 100.5])
+def test_malformed_row_raises(value) -> None:
     provider = Bamservatory()
-    payload = {"daily": [{"date": "2026-10-01", "bamStakePct": None}]}
+    payload = {"daily": [{"date": "2026-10-01", "bamStakePct": value}]}
 
     with patch.object(provider._session, "get", return_value=_mock_resp(payload)):
         with pytest.raises(ValueError, match="Malformed"):
             provider.fetch_rows("network_bam_stake_share", "2026-10-01", "2026-10-01")
+
+
+def test_session_retries_transient_http_errors() -> None:
+    provider = Bamservatory()
+    retry = provider._session.get_adapter(provider.BASE_URL).max_retries
+
+    assert retry.total == 3
+    assert {429, 502, 503, 504} <= set(retry.status_forcelist)
+    assert "GET" in retry.allowed_methods
