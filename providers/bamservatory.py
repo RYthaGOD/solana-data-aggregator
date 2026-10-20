@@ -13,6 +13,16 @@ from metrics.network import Network, NetworkMetricType
 from providers.base import BaseProvider
 
 
+def _is_iso_date(day: Any) -> bool:
+    """True only for a canonical YYYY-MM-DD string, so range checks compare like with like."""
+    if not isinstance(day, str):
+        return False
+    try:
+        return datetime.date.fromisoformat(day).isoformat() == day
+    except ValueError:
+        return False
+
+
 class Bamservatory(BaseProvider):
     """Fetch BAM stake share from BAMservatory's published metrics.
 
@@ -103,7 +113,7 @@ class Bamservatory(BaseProvider):
             day = row.get("date") if isinstance(row, dict) else None
             value = row.get(field) if isinstance(row, dict) else None
             if (
-                not isinstance(day, str)
+                not _is_iso_date(day)
                 or isinstance(value, bool)
                 or not isinstance(value, (int, float))
                 or not 0 <= value <= 100

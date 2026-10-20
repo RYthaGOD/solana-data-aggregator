@@ -19,7 +19,7 @@ def test_get_bam_stake_share_live_api() -> None:
 
     rows = provider.fetch_rows("network_bam_stake_share", start, today.isoformat())
     assert rows, "expected at least one completed day in the last week"
-    assert all(0 < row["value"] < 100 for row in rows)
+    assert all(0 <= row["value"] <= 100 for row in rows)
 
     metric = provider.get_metric(
         metric="network_bam_stake_share",

@@ -131,3 +131,13 @@ def test_session_retries_transient_http_errors() -> None:
     assert retry.total == 3
     assert {429, 502, 503, 504} <= set(retry.status_forcelist)
     assert "GET" in retry.allowed_methods
+
+
+@pytest.mark.parametrize("day", [None, 20261001, "2026-10-01junk", "2026-10-1", ""])
+def test_malformed_date_raises(day) -> None:
+    provider = Bamservatory()
+    payload = {"daily": [{"date": day, "bamStakePct": 35.0}]}
+
+    with patch.object(provider._session, "get", return_value=_mock_resp(payload)):
+        with pytest.raises(ValueError, match="Malformed"):
+            provider.fetch_rows("network_bam_stake_share", "2026-10-01", "2026-10-01")
